@@ -1,4 +1,3 @@
-
 import celery
 from celery import chord
 import random
@@ -17,13 +16,13 @@ class OrderProcessingError(Exception):
 
 # --- Main Tasks ---
 
-@app.task(bind=True, max_retries=3, default_retry_delay=5)
+@app.task(bind=True, max_retries=0, default_retry_delay=2)
 def process_payment(self, order_id):
     """Processes the payment for an order."""
     try:
         logging.info(f"Processing payment for order {order_id}...")
         # Simulate a transient failure
-        if random.choice([True, False, False]): # 33% chance of failure
+        if True: #random.choice([True, False, False]): # 33% chance of failure
             logging.warning(f"Payment processing failed for order {order_id}.")
             raise OrderProcessingError("Payment gateway timeout")
         logging.info(f"Payment processed successfully for order {order_id}")
@@ -123,42 +122,46 @@ def cancel_shipping_label(order_id):
 
 # --- Error Handler Task ---
 @app.task
-def order_processing_error_handler(request, exc, traceback, order_id, successful_tasks):
+def order_processing_error_handler(request, exc, traceback, order_id):
     """
     Handles errors during order processing and triggers rollbacks.
+    This version is simplified and doesn't rely on 'successful_tasks'.
+    It attempts to refund the payment as a basic rollback action.
     """
     logging.error(f"!!! Order {order_id} failed: {exc}")
     logging.info(f"--- Initiating Rollback for Order {order_id} ---")
-    
-    logging.info(f"Successful tasks before failure: {successful_tasks}")
 
-    for task_name in successful_tasks:
-        if task_name == process_payment.name:
-            refund_payment.delay(order_id)
-        elif task_name == update_inventory.name:
-            revert_inventory_update.delay(order_id)
-        elif task_name == create_shipping_label.name:
-            cancel_shipping_label.delay(order_id)
+    # Basic rollback: always try to refund payment if an order fails.
+    # A more robust implementation would know which steps succeeded.
+    refund_payment.delay(order_id)
+    logging.info(f"Triggered payment refund for order {order_id}.")
 
-from celery import chain, group
+
+from celery import chord, chain
 
 # --- Orchestrator ---
 
 @app.task
 def process_order(order_id):
     """
-    Orchestrates the order processing workflow using a chain.
-    The output of each task is passed as the first argument to the next.
+    Orchestrates the order processing workflow using a chord.
+    The header runs tasks in parallel, and the body is the callback.
     """
-    # Define the chain of tasks
+    # The 'header' of the chord runs a group of tasks.
+    # Here we create a chain for the main workflow.
     workflow = chain(
         process_payment.s(order_id),
         update_inventory.s(),
         create_shipping_label.s()
     )
 
-    # Execute the chain with a final callback for success and an error handler for failure
-    workflow.apply_async(
-        link=notify_customer.s(order_id=order_id),
-        link_error=order_processing_error_handler.s(order_id=order_id)
+    # The 'body' of the chord is the callback that executes after the header is complete.
+    # The callback receives the results of the tasks in the header.
+    callback = notify_customer.s(order_id=order_id)
+
+    # We use a chord to link the workflow to the final notification.
+    # The error handler will be called if any task in the workflow fails.
+    chord(workflow)(
+        callback,
+        errbacks=[order_processing_error_handler.s(order_id=order_id)]
     )
