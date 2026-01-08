@@ -32,40 +32,58 @@ def process_payment(self, order_id):
         logging.warning(f"Retrying payment for order {order_id}...")
         self.retry(exc=exc)
 
-@app.task(bind=True, max_retries=3, default_retry_delay=5)
+@app.task(bind=True, max_retries=0, default_retry_delay=5)
 def sell_item(self, order_id):
     """Sells the item for an order."""
     try:
         logging.info(f"Selling item for order {order_id}...")
         time.sleep(1)
-        logging.info(f"Item sold for order {order_id}.")
         # Simulate a transient failure
-        if random.choice([True, False, False]): # 33% chance of failure
+        if False: #random.choice([True, False, False]): # 33% chance of failure
             logging.warning(f"Selling item failed for order {order_id}.")
             raise OrderProcessingError("Inventory system timeout")
-        logging.info(f"Item sold successfully for order {order_id}")
-        return {'order_id': order_id, 'sell_status': 'completed'}
+        else:
+            logging.info(f"Item sold for order {order_id}.")
+
+        return {'order_id': order_id, 'sell_status': 'completed', 'item_id': f'ITEM-{order_id}'}
     except OrderProcessingError as exc:
         logging.warning(f"Retrying selling item for order {order_id}...")
         self.retry(exc=exc)
 
 @app.task(bind=True, max_retries=0, default_retry_delay=5)
-def update_inventory(self, payment_result):
-    """Updates the inventory for an order."""
+def finish_inventory_update(self, sell_items_results, payment_result):
+    """
+    Callback task that runs after all items are sold.
+    """
     order_id = payment_result['order_id']
-    items = range(4)  # Simulate 4 items to be sold
+    
+    # Extract item_ids for logging
+    item_ids = [res.get('item_id') for res in sell_items_results]
+    logging.info(f"All items sold for order {order_id}. Item IDs: {item_ids}")
 
+    logging.info(f"Updating inventory for order {order_id} based on payment: {payment_result}")
+    
     try:
-        logging.info(f"Updating inventory for order {order_id} based on payment: {payment_result}")
         # Simulate a permanent failure
-        if True: #random.choice([True, False, False, False]): # 25% chance of failure
+        if False: #random.choice([True, False, False, False]): # 25% chance of failure
              logging.error(f"Insufficient stock for order {order_id}. Cannot fulfill.")
              raise OrderProcessingError("Insufficient stock")
         logging.info(f"Inventory updated successfully for order {order_id}")
-        return {'order_id': order_id, 'inventory_status': 'updated', 'payment_info': payment_result}
+        return {'order_id': order_id, 'inventory_status': 'updated', 'payment_info': payment_result, 'sold_items': sell_items_results}
     except OrderProcessingError as exc:
         logging.warning(f"Retrying inventory update for order {order_id}...")
         self.retry(exc=exc)
+
+@app.task(bind=True)
+def update_inventory(self, payment_result):
+    """Updates the inventory for an order by triggering sell_item group."""
+    order_id = payment_result['order_id']
+    items = range(4)  # Simulate 4 items to be sold
+
+    header = group(sell_item.s(order_id) for _ in items)
+    callback = finish_inventory_update.s(payment_result)
+    
+    raise self.replace(chord(header, callback))
 
 @app.task(bind=True, max_retries=3, default_retry_delay=5)
 def create_shipping_label(self, inventory_result):
@@ -86,24 +104,24 @@ def create_shipping_label(self, inventory_result):
 # --- Callback Task ---
 
 @app.task
-def notify_customer(results, order_id):
+def notify_customer(results):
     """Notifies the customer that the order is complete."""
-    logging.info(f"All tasks completed for order {order_id}: {results}")
-    logging.info(f"Notifying customer for order {order_id}...")
+    logging.info(f"All tasks completed for order: {results}")
+    # logging.info(f"Notifying customer for order {order_id}...")
     # Simulate sending an email
     time.sleep(2)
-    logging.info(f"Customer notified for order {order_id}")
-    return f"Customer notified for {order_id}"
+    logging.info(f"Customer notified for order ")
+    return f"Customer notified for "
 
 
 # --- Compensating (Rollback) Tasks ---
 @app.task
-def refund_payment(order_id):
+def refund_payment(payment_id):
     """Refunds the payment for a failed order."""
-    logging.info(f"Refunding payment for order {order_id}...")
+    logging.info(f"Refunding payment for payment ID {payment_id}...")
     time.sleep(1)
-    logging.info(f"Payment refunded for order {order_id}")
-    return f"Payment refunded for {order_id}"
+    logging.info(f"Payment refunded for payment ID {payment_id}")
+    return f"Payment refunded for {payment_id}"
 
 @app.task
 def revert_inventory_update(order_id):
@@ -135,18 +153,22 @@ def order_processing_error_handler(request, exc, traceback):
 
     if request.args:
         task_args = request.args
-        logging.info(f"Full task arguments: {task_args}")
+        # logging.info(f"Full task arguments: {task_args}")
 
         # Based on your log, the dictionary is the first element of the tuple
         if len(task_args) > 0 and isinstance(task_args[0], dict):
             payload = task_args[0]
             order_id = payload.get('order_id')
+            payment_status = payload.get('payment_status')
+            payment_id = payload.get('payment_id')
+
             logging.error(f"!!! Order {order_id} failed: {exc}")
+            logging.info(f"Payment Status: {payment_status}, Payment ID: {payment_id}")
             logging.info(f"--- Initiating Rollback for Order {order_id} ---")
 
             # You can now implement your rollback logic using order_id
-            # if payload.get('payment_status') == 'processed':
-            #     refund_payment.delay(order_id)
+            if payload.get('payment_status') == 'processed':
+                refund_payment.delay(payment_id)
 
 
     # logging.info(f"--- Initiating Rollback for Order {order_id} ---")
