@@ -23,7 +23,7 @@ def process_payment(self, order_id):
     try:
         logging.info(f"Processing payment for order {order_id}...")
         # Simulate a transient failure
-        if True: #random.choice([True, False, False]): # 33% chance of failure
+        if False: #random.choice([True, False, False]): # 33% chance of failure
             logging.warning(f"Payment processing failed for order {order_id}.")
             raise OrderProcessingError("Payment gateway timeout")
         logging.info(f"Payment processed successfully for order {order_id}")
@@ -49,7 +49,7 @@ def sell_item(self, order_id):
         logging.warning(f"Retrying selling item for order {order_id}...")
         self.retry(exc=exc)
 
-@app.task(bind=True, max_retries=3, default_retry_delay=5)
+@app.task(bind=True, max_retries=0, default_retry_delay=5)
 def update_inventory(self, payment_result):
     """Updates the inventory for an order."""
     order_id = payment_result['order_id']
@@ -58,7 +58,7 @@ def update_inventory(self, payment_result):
     try:
         logging.info(f"Updating inventory for order {order_id} based on payment: {payment_result}")
         # Simulate a permanent failure
-        if random.choice([True, False, False, False]): # 25% chance of failure
+        if True: #random.choice([True, False, False, False]): # 25% chance of failure
              logging.error(f"Insufficient stock for order {order_id}. Cannot fulfill.")
              raise OrderProcessingError("Insufficient stock")
         logging.info(f"Inventory updated successfully for order {order_id}")
@@ -123,20 +123,32 @@ def cancel_shipping_label(order_id):
 
 # --- Error Handler Task ---
 @app.task
-def order_processing_error_handler(task_id):
+def order_processing_error_handler(request, exc, traceback):
     """
     Handles errors during order processing and triggers rollbacks.
     """
     logging.info(f"--- Order Processing Error Handler Invoked ---")
+    logging.info(f"Task {request.id} raised exception: {exc}")
 
-    result = celery.result.AsyncResult(task_id)
+# Access the actual arguments using request.args
+    # argsrepr is just a string for display; args contains the real data (tuple)
 
-    order_id = result.args[0] if result.args else 'unknown'
-    exc = result.result
+    if request.args:
+        task_args = request.args
+        logging.info(f"Full task arguments: {task_args}")
 
-    logging.info(f"result: {result}")
+        # Based on your log, the dictionary is the first element of the tuple
+        if len(task_args) > 0 and isinstance(task_args[0], dict):
+            payload = task_args[0]
+            order_id = payload.get('order_id')
+            logging.error(f"!!! Order {order_id} failed: {exc}")
+            logging.info(f"--- Initiating Rollback for Order {order_id} ---")
 
-    # logging.error(f"!!! Order {order_id} failed: {exc}")
+            # You can now implement your rollback logic using order_id
+            # if payload.get('payment_status') == 'processed':
+            #     refund_payment.delay(order_id)
+
+
     # logging.info(f"--- Initiating Rollback for Order {order_id} ---")
 
     # logging.info(f"Successful tasks before failure: {successful_tasks}")
