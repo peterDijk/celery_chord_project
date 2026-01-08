@@ -107,11 +107,23 @@ def create_shipping_label(self, inventory_result):
 def notify_customer(results):
     """Notifies the customer that the order is complete."""
     logging.info(f"All tasks completed for order: {results}")
-    # logging.info(f"Notifying customer for order {order_id}...")
+
+    # Extract attributes for logging
+    order_id = results.get('order_id')
+    shipping_status = results.get('shipping_status')
+    inventory_info = results.get('inventory_info', {})
+    payment_info = inventory_info.get('payment_info', {})
+    payment_id = payment_info.get('payment_id')
+    sold_items = inventory_info.get('sold_items', [])
+    item_ids = [item.get('item_id') for item in sold_items]
+
+    logging.info("======================== Order Summary ========================")
+    logging.info(f"Order Summary: OrderID={order_id}, PaymentID={payment_id}, Shipping={shipping_status}, ItemIDs={item_ids}")
+    
     # Simulate sending an email
     time.sleep(2)
-    logging.info(f"Customer notified for order ")
-    return f"Customer notified for "
+    logging.info(f"Customer notified for order {order_id}")
+    return f"Customer notified for {order_id}"
 
 
 # --- Compensating (Rollback) Tasks ---
