@@ -24,38 +24,61 @@ def process_payment(self, order_id):
         logging.info(f"Processing payment for order {order_id}...")
         # Simulate a transient failure
         if random.choice([True, False, False]): # 33% chance of failure
-            logging.warning(f"Payment processing failed for order {order_id}. Retrying...")
+            logging.warning(f"Payment processing failed for order {order_id}.")
             raise OrderProcessingError("Payment gateway timeout")
         logging.info(f"Payment processed successfully for order {order_id}")
-        return f"Payment successful for {order_id}"
+        return {'order_id': order_id, 'payment_status': 'processed', 'payment_id': f'PAY-{order_id}'}
     except OrderProcessingError as exc:
+        logging.warning(f"Retrying payment for order {order_id}...")
         self.retry(exc=exc)
 
 @app.task(bind=True, max_retries=3, default_retry_delay=5)
-def update_inventory(self, order_id):
-    """Updates the inventory for an order."""
+def sell_item(self, order_id):
+    """Sells the item for an order."""
     try:
-        logging.info(f"Updating inventory for order {order_id}...")
+        logging.info(f"Selling item for order {order_id}...")
+        time.sleep(1)
+        logging.info(f"Item sold for order {order_id}.")
+        # Simulate a transient failure
+        if random.choice([True, False, False]): # 33% chance of failure
+            logging.warning(f"Selling item failed for order {order_id}.")
+            raise OrderProcessingError("Inventory system timeout")
+        logging.info(f"Item sold successfully for order {order_id}")
+        return {'order_id': order_id, 'sell_status': 'completed'}
+    except OrderProcessingError as exc:
+        logging.warning(f"Retrying selling item for order {order_id}...")
+        self.retry(exc=exc)
+
+@app.task(bind=True, max_retries=3, default_retry_delay=5)
+def update_inventory(self, payment_result):
+    """Updates the inventory for an order."""
+    order_id = payment_result['order_id']
+    items = range(4)  # Simulate 4 items to be sold
+
+    try:
+        logging.info(f"Updating inventory for order {order_id} based on payment: {payment_result}")
         # Simulate a permanent failure
         if random.choice([True, False, False, False]): # 25% chance of failure
              logging.error(f"Insufficient stock for order {order_id}. Cannot fulfill.")
              raise OrderProcessingError("Insufficient stock")
         logging.info(f"Inventory updated successfully for order {order_id}")
-        return f"Inventory updated for {order_id}"
+        return {'order_id': order_id, 'inventory_status': 'updated', 'payment_info': payment_result}
     except OrderProcessingError as exc:
+        logging.warning(f"Retrying inventory update for order {order_id}...")
         self.retry(exc=exc)
 
 @app.task(bind=True, max_retries=3, default_retry_delay=5)
-def create_shipping_label(self, order_id):
+def create_shipping_label(self, inventory_result):
     """Creates a shipping label for an order."""
+    order_id = inventory_result['order_id']
     try:
-        logging.info(f"Creating shipping label for order {order_id}...")
+        logging.info(f"Creating shipping label for order {order_id} based on inventory: {inventory_result}")
         # Simulate a transient failure
         if random.choice([True, False, False]):
             logging.warning(f"Shipping API is down for order {order_id}. Retrying...")
             raise OrderProcessingError("Shipping API unavailable")
         logging.info(f"Shipping label created successfully for order {order_id}")
-        return f"Shipping label created for {order_id}"
+        return {'order_id': order_id, 'shipping_status': 'label_created', 'inventory_info': inventory_result}
     except OrderProcessingError as exc:
         self.retry(exc=exc)
 
@@ -106,6 +129,8 @@ def order_processing_error_handler(request, exc, traceback, order_id, successful
     """
     logging.error(f"!!! Order {order_id} failed: {exc}")
     logging.info(f"--- Initiating Rollback for Order {order_id} ---")
+    
+    logging.info(f"Successful tasks before failure: {successful_tasks}")
 
     for task_name in successful_tasks:
         if task_name == process_payment.name:
@@ -115,40 +140,25 @@ def order_processing_error_handler(request, exc, traceback, order_id, successful
         elif task_name == create_shipping_label.name:
             cancel_shipping_label.delay(order_id)
 
+from celery import chain, group
+
 # --- Orchestrator ---
 
 @app.task
 def process_order(order_id):
     """
-    Orchestrates the order processing workflow using a chord.
+    Orchestrates the order processing workflow using a chain.
+    The output of each task is passed as the first argument to the next.
     """
-    header = [
+    # Define the chain of tasks
+    workflow = chain(
         process_payment.s(order_id),
-        update_inventory.s(order_id),
-        create_shipping_label.s(order_id),
-    ]
+        update_inventory.s(),
+        create_shipping_label.s()
+    )
 
-    # Create a mutable list to track successful tasks
-    successful_tasks = []
-
-    # Link error callbacks to each task in the header
-    for task_signature in header:
-        task_signature.set(
-            link_error=order_processing_error_handler.s(order_id, successful_tasks)
-        )
-
-    # The chord's callback will only execute if all header tasks succeed
-    callback = notify_customer.s(order_id)
-
-    # Before each task runs, add its name to the successful_tasks list
-    # This is a bit of a workaround to track which tasks have completed
-    # successfully before a failure in the chord. A more robust solution
-    # might involve a state machine or a more complex tracking mechanism
-    # in a database.
-    @celery.signals.before_task_publish.connect
-    def update_sent_tasks(sender=None, headers=None, body=None, **kwargs):
-        if headers['task'] in [t.name for t in header]:
-            if headers['task'] not in successful_tasks:
-                successful_tasks.append(headers['task'])
-
-    chord(header)(callback)
+    # Execute the chain with a final callback for success and an error handler for failure
+    workflow.apply_async(
+        link=notify_customer.s(order_id=order_id),
+        link_error=order_processing_error_handler.s(order_id=order_id)
+    )
