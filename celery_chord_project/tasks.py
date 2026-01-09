@@ -39,7 +39,7 @@ def sell_item(self, order_id):
         logging.info(f"Selling item for order {order_id}...")
         time.sleep(1)
         # Simulate a transient failure
-        if True: #random.choice([True, False, False]): # 33% chance of failure
+        if False: #random.choice([True, False, False]): # 33% chance of failure
             logging.warning(f"Selling item failed for order {order_id}.")
             raise OrderProcessingError("Not in stock temporarily")
         else:
@@ -101,7 +101,7 @@ def create_shipping_label(self, inventory_result):
     try:
         logging.info(f"Creating shipping label for order {order_id} based on inventory: {inventory_result}")
         # Simulate a transient failure
-        if random.choice([True, False, False]):
+        if True: #random.choice([True, False, False]):
             logging.warning(f"Shipping API is down for order {order_id}. Retrying...")
             raise OrderProcessingError("Shipping API unavailable")
         logging.info(f"Shipping label created successfully for order {order_id}")
@@ -223,16 +223,29 @@ def order_processing_error_handler(*args):
         if len(task_args) > 0 and isinstance(task_args[0], dict):
             payload = task_args[0]
             order_id = payload.get('order_id')
+            
+            # Try to find payment details in top level or nested 'payment_info'
             payment_status = payload.get('payment_status')
             payment_id = payload.get('payment_id')
+            
+            if not payment_id and 'payment_info' in payload:
+                payment_info = payload.get('payment_info', {})
+                if isinstance(payment_info, dict):
+                    payment_status = payment_info.get('payment_status')
+                    payment_id = payment_info.get('payment_id')
 
-            logging.error(f"!!! Order {order_id} failed: {exc}")
+            logging.error(f"!!! Order {order_id} failed: {exception_obj}")
             logging.info(f"Payment Status: {payment_status}, Payment ID: {payment_id}")
             logging.info(f"--- Initiating Rollback for Order {order_id} ---")
             
-            if payload.get('payment_status') == 'processed':
+            # Perform Rollbacks based on available data
+            if payment_status == 'processed':
                 refund_payment.delay(payment_id)
-            if payload.get('shipping_status') == 'created':
+            
+            if payload.get('inventory_status') == 'updated':
+                revert_inventory_update.delay(order_id)
+
+            if payload.get('shipping_status') == 'label_created':
                 cancel_shipping_label.delay(order_id)
 
     
