@@ -41,7 +41,7 @@ def sell_item(self, order_id):
         # Simulate a transient failure
         if True: #random.choice([True, False, False]): # 33% chance of failure
             logging.warning(f"Selling item failed for order {order_id}.")
-            raise OrderProcessingError("Inventory system timeout")
+            raise OrderProcessingError("Not in stock temporarily")
         else:
             logging.info(f"Item sold for order {order_id}.")
 
@@ -78,11 +78,20 @@ def finish_inventory_update(self, sell_items_results, payment_result):
 def update_inventory(self, payment_result):
     """Updates the inventory for an order by triggering sell_item group."""
     order_id = payment_result['order_id']
-    items = range(4)  # Simulate 4 items to be sold
+    items = range(1)  # Simulate 4 items to be sold
 
     header = group(sell_item.s(order_id) for _ in items)
+    # Ensure error handler is attached to the body of the chord (the callback)
+    # However, if group tasks fail, the chord callback doesn't run.
+    # We must propagate errors from the group to the main workflow error handler.
     callback = finish_inventory_update.s(payment_result)
     
+    # We must also attach the error handler to the group itself, or construct the chord such that failures propagate.
+    # A standard chord will NOT call the callback if a header task fails.
+    # Using link_error on the group ensures the handler is called if any group task fails.
+    for task_sig in header.tasks:
+        task_sig.link_error(order_processing_error_handler.s(payment_result))
+
     raise self.replace(chord(header, callback))
 
 @app.task(bind=True, max_retries=3, default_retry_delay=5)
@@ -153,18 +162,61 @@ def cancel_shipping_label(order_id):
 
 # --- Error Handler Task ---
 @app.task
-def order_processing_error_handler(request, exc, traceback):
+def order_processing_error_handler(*args):
     """
     Handles errors during order processing and triggers rollbacks.
+    Adapts to different signatures depending on context:
+    - (request, exc, traceback): specific task failure
+    - (context, request, exc, traceback): invoked via link_error with extra context
     """
     logging.info(f"--- Order Processing Error Handler Invoked ---")
-    logging.info(f"Task {request.id} raised exception: {exc}")
+    logging.info(f"Received {len(args)} arguments")
+    
+    # Attempt to identify arguments by type/structure
+    payment_result_context = None
+    request_context = None
+    exception_obj = None
+    
+    # Helper to check if a dict is our payment_result
+    def is_payment_result(d):
+        return isinstance(d, dict) and 'payment_id' in d and 'order_id' in d
 
-# Access the actual arguments using request.args
+    for arg in args:
+        if isinstance(arg, Exception):
+            exception_obj = arg
+        elif is_payment_result(arg):
+            payment_result_context = arg
+        elif hasattr(arg, 'argsrepr'): # Likely a Request/Context object
+             request_context = arg
+
+    # If we didn't find payment_result_context via direct dict check, 
+    # check if it's hiding in the args of a Context object which might have been passed 
+    # (though unlikely for bound args to end up INSIDE the request context's args)
+    
+    # Fallback assignment for standard signature (request, exc, traceback)
+    if not request_context and len(args) >= 1 and hasattr(args[0], 'id'):
+         request_context = args[0]
+         if len(args) >= 2: exception_obj = args[1] 
+
+    if request_context:
+        logging.info(f"Task {request_context.id} raised: {exception_obj}")
+
+    # Use the found payment_result
+    if payment_result_context:
+        order_id = payment_result_context.get('order_id')
+        payment_id = payment_result_context.get('payment_id')
+        logging.error(f"!!! Error handled with explicit context for order {order_id}")
+        
+        if payment_result_context.get('payment_status') == 'processed':
+             logging.info(f"--- Initiating Rollback for Order {order_id} using explicit context ---")
+             refund_payment.delay(payment_id)
+        return
+
+    # Access the actual arguments using request.args
     # argsrepr is just a string for display; args contains the real data (tuple)
 
-    if request.args:
-        task_args = request.args
+    if request_context and request_context.args:
+        task_args = request_context.args
         # logging.info(f"Full task arguments: {task_args}")
 
         # Based on your log, the dictionary is the first element of the tuple
@@ -177,24 +229,13 @@ def order_processing_error_handler(request, exc, traceback):
             logging.error(f"!!! Order {order_id} failed: {exc}")
             logging.info(f"Payment Status: {payment_status}, Payment ID: {payment_id}")
             logging.info(f"--- Initiating Rollback for Order {order_id} ---")
-
-            # You can now implement your rollback logic using order_id
+            
             if payload.get('payment_status') == 'processed':
                 refund_payment.delay(payment_id)
+            if payload.get('shipping_status') == 'created':
+                cancel_shipping_label.delay(order_id)
 
-
-    # logging.info(f"--- Initiating Rollback for Order {order_id} ---")
-
-    # logging.info(f"Successful tasks before failure: {successful_tasks}")
-
-    # for task_name in successful_tasks:
-    #     if task_name == process_payment.name:
-    #         refund_payment.delay(order_id)
-    #     elif task_name == update_inventory.name:
-    #         revert_inventory_update.delay(order_id)
-    #     elif task_name == create_shipping_label.name:
-    #         cancel_shipping_label.delay(order_id)
-
+    
 from celery import chain, group
 
 # --- Orchestrator ---
