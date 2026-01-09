@@ -101,7 +101,7 @@ def create_shipping_label(self, inventory_result):
     try:
         logging.info(f"Creating shipping label for order {order_id} based on inventory: {inventory_result}")
         # Simulate a transient failure
-        if True: #random.choice([True, False, False]):
+        if False: #random.choice([True, False, False]):
             logging.warning(f"Shipping API is down for order {order_id}. Retrying...")
             raise OrderProcessingError("Shipping API unavailable")
         logging.info(f"Shipping label created successfully for order {order_id}")
