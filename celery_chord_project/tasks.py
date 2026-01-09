@@ -39,7 +39,7 @@ def sell_item(self, order_id):
         logging.info(f"Selling item for order {order_id}...")
         time.sleep(1)
         # Simulate a transient failure
-        if False: #random.choice([True, False, False]): # 33% chance of failure
+        if True: #random.choice([True, False, False]): # 33% chance of failure
             logging.warning(f"Selling item failed for order {order_id}.")
             raise OrderProcessingError("Inventory system timeout")
         else:
